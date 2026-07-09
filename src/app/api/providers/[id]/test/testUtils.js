@@ -103,6 +103,23 @@ const OAUTH_TEST_CONFIG = {
     },
     refreshable: false,
   },
+  // Grok CLI / Grok Build — probe /v1/user (no inference quota). Headers mirror official CLI.
+  "grok-cli": {
+    url: PROVIDERS["grok-cli"]?.userUrl || "https://cli-chat-proxy.grok.com/v1/user",
+    method: "GET",
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
+    extraHeaders: {
+      Accept: "application/json",
+      ...(PROVIDERS["grok-cli"]?.headers || {
+        "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+        "x-xai-token-auth": "xai-grok-cli",
+        "x-grok-client-identifier": "grok-pager",
+        "x-grok-client-version": "0.2.93",
+      }),
+    },
+    refreshable: true,
+  },
 };
 
 async function probeClineAccessToken(accessToken) {
@@ -186,7 +203,7 @@ async function refreshOAuthToken(connection) {
       return { accessToken: data.access_token, expiresIn: data.expires_in, refreshToken: data.refresh_token || refreshToken };
     }
 
-    if (provider === "codex") {
+    if (provider === "codex" || provider === "grok-cli" || provider === "xai") {
       return await refreshProviderCredentials(provider, connection, console);
     }
 
