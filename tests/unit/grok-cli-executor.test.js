@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { GrokCliExecutor } from "../../open-sse/executors/grok-cli.js";
+import {
+  GrokCliExecutor,
+  countGrokCliUserTurns,
+  resolveGrokCliTurnIdx,
+  _resetGrokCliTurnStore,
+} from "../../open-sse/executors/grok-cli.js";
 import { getExecutor, hasSpecializedExecutor } from "../../open-sse/executors/index.js";
 import { PROVIDERS, PROVIDER_OAUTH, PROVIDER_MODELS } from "../../open-sse/providers/index.js";
 import { getModelUpstreamId } from "../../open-sse/config/providerModels.js";
@@ -49,6 +54,7 @@ describe("GrokCliExecutor", () => {
   let executor;
 
   beforeEach(() => {
+    _resetGrokCliTurnStore();
     executor = new GrokCliExecutor();
   });
 
@@ -68,6 +74,7 @@ describe("GrokCliExecutor", () => {
     executor._currentReqId = "req-xyz";
     executor._agentId = "agent-1";
     executor._currentModel = "grok-4.5";
+    executor._currentTurnIdx = 3;
 
     const headers = executor.buildHeaders(
       {
@@ -85,12 +92,31 @@ describe("GrokCliExecutor", () => {
     expect(headers["x-grok-session-id"]).toBe("sess-abc");
     expect(headers["x-grok-conv-id"]).toBe("sess-abc");
     expect(headers["x-grok-req-id"]).toBe("req-xyz");
+    expect(headers["x-grok-turn-idx"]).toBe("3");
     expect(headers["x-grok-agent-id"]).toBe("agent-1");
     expect(headers["x-grok-model-override"]).toBe("grok-4.5");
     expect(headers["x-compaction-at"]).toBe("400000");
     expect(headers["x-email"]).toBe("u@example.com");
     expect(headers["x-userid"]).toBe("uid-1");
     expect(headers["x-authenticateresponse"]).toBe("authenticate-response");
+  });
+
+  it("buildHeaders falls back to top-level email/userId (OAuth mapTokens shape)", () => {
+    executor._currentSessionId = "sess-top";
+    executor._currentReqId = "req-top";
+
+    const headers = executor.buildHeaders(
+      {
+        accessToken: "tok_test",
+        email: "top@example.com",
+        // userId only top-level; psd has neither email nor userId
+        providerSpecificData: { authMethod: "device_code" },
+      },
+      true
+    );
+
+    expect(headers["x-email"]).toBe("top@example.com");
+    expect(headers["x-userid"]).toBeUndefined();
   });
 
   it("transformRequest normalizes Responses body like official CLI", () => {
@@ -130,6 +156,7 @@ describe("GrokCliExecutor", () => {
     expect(out.user).toBeUndefined();
     expect(Array.isArray(out.input)).toBe(true);
     expect(out.input.length).toBeGreaterThan(0);
+    expect(executor._currentTurnIdx).toBe(1);
 
     // tools flattened + hosted tools kept
     expect(out.tools).toHaveLength(3);
@@ -143,7 +170,7 @@ describe("GrokCliExecutor", () => {
     expect(out.tools[2]).toEqual({ type: "x_search" });
   });
 
-  it("transformRequest preserves developer/system input and strips server ids", () => {
+  it("transformRequest keeps role:system (HAR parity) and strips server ids", () => {
     const body = {
       model: "grok-4.5",
       input: [
@@ -157,9 +184,93 @@ describe("GrokCliExecutor", () => {
 
     const out = executor.transformRequest("grok-4.5", body, true, { connectionId: "c1" });
     expect(out.input).toHaveLength(2);
-    expect(out.input[0].role).toBe("developer");
+    // Official CLI sends system, not developer (Codex converts; Grok does not)
+    expect(out.input[0].role).toBe("system");
     expect(out.input[1].id).toBeUndefined();
     expect(out.reasoning.effort).toBe("medium");
+  });
+
+  it("increments x-grok-turn-idx from user-message count and stays monotonic", () => {
+    const creds = {
+      connectionId: "turn-conn",
+      rawHeaders: { "x-session-id": "stable-session-xyz" },
+    };
+
+    // Turn 1: one user message
+    executor.transformRequest(
+      "grok-4.5",
+      {
+        model: "grok-4.5",
+        input: [
+          { type: "message", role: "system", content: "sys" },
+          { type: "message", role: "user", content: "hi" },
+        ],
+      },
+      true,
+      creds
+    );
+    expect(executor._currentSessionId).toBeTruthy();
+    expect(executor._currentTurnIdx).toBe(1);
+    let headers = executor.buildHeaders({ accessToken: "t" }, true);
+    expect(headers["x-grok-turn-idx"]).toBe("1");
+    expect(headers["x-grok-session-id"]).toBe(executor._currentSessionId);
+    expect(headers["x-grok-conv-id"]).toBe(executor._currentSessionId);
+
+    const sessionId = executor._currentSessionId;
+
+    // Turn 2: full history with two user messages
+    executor.transformRequest(
+      "grok-4.5",
+      {
+        model: "grok-4.5",
+        input: [
+          { type: "message", role: "system", content: "sys" },
+          { type: "message", role: "user", content: "hi" },
+          { type: "message", role: "assistant", content: "hello" },
+          { type: "message", role: "user", content: "next" },
+        ],
+      },
+      true,
+      creds
+    );
+    expect(executor._currentSessionId).toBe(sessionId);
+    expect(executor._currentTurnIdx).toBe(2);
+    headers = executor.buildHeaders({ accessToken: "t" }, true);
+    expect(headers["x-grok-turn-idx"]).toBe("2");
+
+    // Same session, payload that only has 1 user msg (delta-style client) must not go backwards
+    executor.transformRequest(
+      "grok-4.5",
+      {
+        model: "grok-4.5",
+        input: [{ type: "message", role: "user", content: "only latest" }],
+      },
+      true,
+      creds
+    );
+    expect(executor._currentTurnIdx).toBe(2);
+  });
+
+  it("countGrokCliUserTurns / resolveGrokCliTurnIdx helpers", () => {
+    expect(countGrokCliUserTurns(null)).toBe(1);
+    expect(
+      countGrokCliUserTurns([
+        { type: "message", role: "system", content: "s" },
+        { type: "message", role: "user", content: "a" },
+        { type: "message", role: "assistant", content: "b" },
+        { type: "message", role: "user", content: "c" },
+      ])
+    ).toBe(2);
+
+    expect(resolveGrokCliTurnIdx("s1", [{ role: "user", type: "message", content: "a" }])).toBe(1);
+    expect(
+      resolveGrokCliTurnIdx("s1", [
+        { role: "user", type: "message", content: "a" },
+        { role: "user", type: "message", content: "b" },
+      ])
+    ).toBe(2);
+    // monotonic
+    expect(resolveGrokCliTurnIdx("s1", [{ role: "user", type: "message", content: "a" }])).toBe(2);
   });
 
   it("parseError surfaces 402 spending-limit", () => {

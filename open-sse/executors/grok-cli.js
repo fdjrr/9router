@@ -47,13 +47,43 @@ const RESPONSES_API_ALLOWLIST = new Set([
 
 const EFFORT_LEVELS = ["low", "medium", "high"];
 
-function convertSystemToDeveloperRole(body) {
-  if (!Array.isArray(body.input)) return;
-  for (const item of body.input) {
+// Per-session last turn index so multi-turn headers never go backwards within this process
+const sessionTurnStore = new Map();
+
+/**
+ * Count user turns in a Responses `input` array.
+ * Official CLI sets x-grok-turn-idx to the 1-based conversation turn (≈ user messages).
+ * HAR: first chat turn → "1".
+ */
+export function countGrokCliUserTurns(input) {
+  if (!Array.isArray(input)) return 1;
+  let n = 0;
+  for (const item of input) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const isSystemMsg = item.role === "system" && (!item.type || item.type === "message");
-    if (isSystemMsg) item.role = "developer";
+    const type = typeof item.type === "string" ? item.type : "";
+    // Responses message items (type omitted or "message") with role user
+    if (item.role === "user" && (!type || type === "message")) n += 1;
   }
+  return Math.max(1, n);
+}
+
+/**
+ * Resolve monotonic turn index for a session.
+ * Prefers user-message count from the payload (full history clients), but never
+ * decreases vs the last index observed for the same sessionId in this process.
+ */
+export function resolveGrokCliTurnIdx(sessionId, input) {
+  const fromInput = countGrokCliUserTurns(input);
+  if (!sessionId) return fromInput;
+  const prev = sessionTurnStore.get(sessionId) || 0;
+  const turn = Math.max(fromInput, prev);
+  sessionTurnStore.set(sessionId, turn);
+  return turn;
+}
+
+/** Test helper — clear in-memory turn counters */
+export function _resetGrokCliTurnStore() {
+  sessionTurnStore.clear();
 }
 
 function stripStoredItemReferences(body) {
@@ -154,6 +184,7 @@ export class GrokCliExecutor extends BaseExecutor {
     super("grok-cli", PROVIDERS["grok-cli"]);
     this._currentSessionId = null;
     this._currentReqId = null;
+    this._currentTurnIdx = 1;
     this._agentId = null;
   }
 
@@ -190,9 +221,10 @@ export class GrokCliExecutor extends BaseExecutor {
     const sessionId = this._currentSessionId || credentials?.connectionId || crypto.randomUUID();
     const reqId = this._currentReqId || crypto.randomUUID();
     headers["x-grok-session-id"] = sessionId;
+    // CLI uses the same id for conv + session on chat turns
     headers["x-grok-conv-id"] = sessionId;
     headers["x-grok-req-id"] = reqId;
-    headers["x-grok-turn-idx"] = "1";
+    headers["x-grok-turn-idx"] = String(this._currentTurnIdx || 1);
 
     if (this._agentId) headers["x-grok-agent-id"] = this._agentId;
 
@@ -203,10 +235,13 @@ export class GrokCliExecutor extends BaseExecutor {
       headers["x-compaction-at"] = String(this.config.compactionAt);
     }
 
-    // Optional identity from stored connection / JWT claims
+    // Identity: mapTokens stores email top-level AND in providerSpecificData;
+    // fall back either way so OAuth connections always fingerprint like the CLI.
     const psd = credentials?.providerSpecificData || {};
-    if (psd.email) headers["x-email"] = psd.email;
-    if (psd.userId) headers["x-userid"] = psd.userId;
+    const email = psd.email || credentials?.email;
+    const userId = psd.userId || credentials?.userId || credentials?.providerUserId;
+    if (email) headers["x-email"] = email;
+    if (userId) headers["x-userid"] = userId;
 
     return headers;
   }
@@ -231,7 +266,7 @@ export class GrokCliExecutor extends BaseExecutor {
   }
 
   transformRequest(model, body, stream, credentials) {
-    // Session / request ids for headers
+    // Session / request ids for headers — stable per client conversation when possible
     this._currentSessionId = resolveSessionId({
       headers: credentials?.rawHeaders,
       body,
@@ -265,9 +300,13 @@ export class GrokCliExecutor extends BaseExecutor {
       }
     }
 
-    convertSystemToDeveloperRole(body);
+    // Keep role:"system" as-is — official grok-pager HAR sends system, not developer
+    // (Codex converts system→developer; Grok CLI does not).
     stripStoredItemReferences(body);
     normalizeGrokCliTools(body);
+
+    // Turn index after input is finalized (user-message count, monotonic per session)
+    this._currentTurnIdx = resolveGrokCliTurnIdx(this._currentSessionId, body.input);
 
     body.stream = true;
     body.store = false;
