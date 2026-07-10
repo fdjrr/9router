@@ -51,6 +51,11 @@ export default {
     },
     // Compaction threshold mirrored from CLI (x-compaction-at)
     compactionAt: 400000,
+    // Quota tracker: official CLI polls billing?format=credits + user?include=subscription
+    usage: {
+      url: "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+      userUrl: "https://cli-chat-proxy.grok.com/v1/user?include=subscription",
+    },
     retry: {
       429: { attempts: 2, delayMs: 2000 },
       502: { attempts: 2, delayMs: 1500 },
@@ -63,6 +68,9 @@ export default {
     { id: "grok-4.5-medium", name: "Grok 4.5 (Medium)", upstreamModelId: "grok-4.5" },
     { id: "grok-4.5-low", name: "Grok 4.5 (Low)", upstreamModelId: "grok-4.5" },
   ],
+  features: {
+    usage: true,
+  },
   oauth: {
     // Same public client_id as Grok CLI / existing xai OAuth
     clientId: "b1a00492-073a-47ea-816f-4c329264a828",
