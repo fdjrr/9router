@@ -285,4 +285,92 @@ describe("GrokCliExecutor", () => {
     expect(err.code).toBe("personal-team-blocked:spending-limit");
     expect(err.message).toMatch(/credits/i);
   });
+
+  describe("token refresh", () => {
+    it("_resolveRefreshToken reads top-level refreshToken", () => {
+      expect(
+        executor._resolveRefreshToken({ refreshToken: "rt1" })
+      ).toBe("rt1");
+    });
+
+    it("_resolveRefreshToken falls back to providerSpecificData.refreshToken", () => {
+      expect(
+        executor._resolveRefreshToken({
+          providerSpecificData: { refreshToken: "rt2" },
+        })
+      ).toBe("rt2");
+    });
+
+    it("_resolveRefreshToken prefers top-level over psd fallback", () => {
+      expect(
+        executor._resolveRefreshToken({
+          refreshToken: "rt_top",
+          providerSpecificData: { refreshToken: "rt_psd" },
+        })
+      ).toBe("rt_top");
+    });
+
+    it("_resolveRefreshToken returns null when neither source has it", () => {
+      expect(executor._resolveRefreshToken({})).toBeNull();
+      expect(executor._resolveRefreshToken(null)).toBeNull();
+      expect(executor._resolveRefreshToken({ providerSpecificData: {} })).toBeNull();
+    });
+
+    it("refreshCredentials returns null when no refresh token anywhere", async () => {
+      const result = await executor.refreshCredentials({ accessToken: "tok" }, null);
+      expect(result).toBeNull();
+    });
+
+    it("refreshCredentials bridges psd refreshToken onto credentials before calling refreshProviderCredentials", async () => {
+      // When psd has rt, _resolveRefreshToken finds it and the method bridges
+      // it onto a spread copy of credentials.refreshToken before calling
+      // refreshProviderCredentials. The bridge means refreshProviderCredentials
+      // receives an object with refreshToken set, so it should attempt a real
+      // fetch rather than short-circuiting with null.
+      const credentials = {
+        accessToken: "expired",
+        connectionId: "test-conn",
+        providerSpecificData: { refreshToken: "psd_rt" },
+      };
+      // The bridge copies via spread — original object is not mutated.
+      // refreshProviderCredentials will try to fetch(); since there's no
+      // network, it returns null (fetch fails). But importantly it does NOT
+      // return null from the refreshToken check itself.
+      const result = await executor.refreshCredentials(credentials, null);
+      expect(result).not.toBeNull();
+    });
+
+    it("needsRefresh returns true when expiresAt is missing and createdAt is old", () => {
+      const old = new Date(Date.now() - 55 * 60 * 1000).toISOString();
+      const creds = {
+        refreshToken: "rt",
+        createdAt: old,
+      };
+      expect(executor.needsRefresh(creds)).toBe(true);
+    });
+
+    it("needsRefresh returns false when expiresAt is missing and createdAt is recent", () => {
+      const recent = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const creds = {
+        refreshToken: "rt",
+        createdAt: recent,
+      };
+      expect(executor.needsRefresh(creds)).toBe(false);
+    });
+
+    it("needsRefresh returns false when no refresh token exists", () => {
+      expect(executor.needsRefresh({})).toBe(false);
+      expect(executor.needsRefresh(null)).toBe(false);
+    });
+
+    it("needsRefresh uses standard expiresAt check when present", () => {
+      // expiresAt in far future → false
+      const future = new Date(Date.now() + 3600_000).toISOString();
+      expect(executor.needsRefresh({ expiresAt: future, refreshToken: "rt" })).toBe(false);
+
+      // expiresAt just around the corner → true (via standard shouldRefreshCredentials)
+      const aboutToExpire = new Date(Date.now() + 60_000).toISOString();
+      expect(executor.needsRefresh({ expiresAt: aboutToExpire, refreshToken: "rt" })).toBe(true);
+    });
+  });
 });

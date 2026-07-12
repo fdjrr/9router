@@ -5,6 +5,7 @@ import {
   refreshProviderCredentials,
   shouldRefreshCredentials,
 } from "../services/oauthCredentialManager.js";
+import { TOKEN_EXPIRY_BUFFER_MS } from "../services/tokenRefresh.js";
 import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
 import { getModelUpstreamId } from "../config/providerModels.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
@@ -192,13 +193,49 @@ export class GrokCliExecutor extends BaseExecutor {
     return this.config.baseUrl;
   }
 
+  /**
+   * Resolve the refresh token from a credentials object, checking both the
+   * top-level field and the providerSpecificData fallback.  Official Grok CLI
+   * stores the refresh token both places; this covers either layout.
+   */
+  _resolveRefreshToken(credentials) {
+    if (credentials?.refreshToken) return credentials.refreshToken;
+    return credentials?.providerSpecificData?.refreshToken || null;
+  }
+
   async refreshCredentials(credentials, log) {
-    if (!credentials?.refreshToken) return null;
+    const rt = this._resolveRefreshToken(credentials);
+    if (!rt) return null;
+
+    // Ensure providerSpecificData.refreshToken is set for the downstream merge
+    // (mergeRefreshedCredentials reads psd but refreshTokenByProvider reads
+    // credentials.refreshToken — bridge both).
+    if (!credentials.refreshToken) {
+      credentials = { ...credentials, refreshToken: rt };
+    }
     return refreshProviderCredentials("grok-cli", credentials, log);
   }
 
   needsRefresh(credentials) {
-    return shouldRefreshCredentials("grok-cli", credentials);
+    // Fast path: standard expiry check (expiresAt based)
+    if (shouldRefreshCredentials("grok-cli", credentials)) return true;
+
+    // Fallback: xAI device-code tokens are valid ~45 min; if there's a
+    // refreshToken and no expiresAt, assume expired after 50 min from
+    // createdAt/updatedAt so the next request triggers a proactive refresh.
+    if (this._resolveRefreshToken(credentials)) {
+      const expiresAt = credentials.expiresAt;
+      if (!expiresAt) {
+        const created = credentials.createdAt || credentials.updatedAt;
+        if (created) {
+          const age = Date.now() - new Date(created).getTime();
+          // 50 minutes heuristic: xAI tokens live ~40-45 min
+          if (age > 50 * 60 * 1000 - TOKEN_EXPIRY_BUFFER_MS) return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   buildHeaders(credentials, stream = true) {

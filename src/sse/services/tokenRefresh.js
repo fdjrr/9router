@@ -184,6 +184,15 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
         ...newCredentials.providerSpecificData,
       };
     }
+    // Also mirror refreshToken into providerSpecificData.refreshToken so the
+    // GrokCliExecutor fallback path (_resolveRefreshToken) always has access
+    // even if the top-level column was lost during a migration or re-serialisation.
+    if (newCredentials.refreshToken) {
+      updates.providerSpecificData = {
+        ...(updates.providerSpecificData || newCredentials.existingProviderSpecificData || {}),
+        refreshToken: newCredentials.refreshToken,
+      };
+    }
     if (newCredentials.copilotToken || newCredentials.copilotTokenExpiresAt) {
       updates.providerSpecificData = {
         ...(updates.providerSpecificData || newCredentials.existingProviderSpecificData || {}),
