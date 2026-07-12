@@ -14,6 +14,11 @@ import { getConsistentMachineId } from "../shared/machineId.js";
 // Server-generated item id prefixes that /responses cannot resolve when store=false
 const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
 
+// xAI device-code tokens live ~40-45 minutes.  When the stored credentials lack
+// an expiresAt field, this is the age threshold (45 min typical max minus the
+// standard 5 min lead buffer) at which the fallback considers them expired.
+const XAI_TOKEN_FALLBACK_AGE_MS = 45 * 60 * 1000 - TOKEN_EXPIRY_BUFFER_MS;
+
 // Hosted tool types executed server-side by Grok CLI backend
 const HOSTED_TOOL_TYPES = new Set([
   "web_search",
@@ -220,17 +225,16 @@ export class GrokCliExecutor extends BaseExecutor {
     // Fast path: standard expiry check (expiresAt based)
     if (shouldRefreshCredentials("grok-cli", credentials)) return true;
 
-    // Fallback: xAI device-code tokens are valid ~45 min; if there's a
-    // refreshToken and no expiresAt, assume expired after 50 min from
-    // createdAt/updatedAt so the next request triggers a proactive refresh.
+    // Fallback: xAI device-code tokens live ~40-45 min.  When the stored
+    // credentials lack an expiresAt field, trigger a proactive refresh once
+    // the credential is at least 40 min old (45 min max minus 5 min lead).
     if (this._resolveRefreshToken(credentials)) {
       const expiresAt = credentials.expiresAt;
       if (!expiresAt) {
         const created = credentials.createdAt || credentials.updatedAt;
         if (created) {
           const age = Date.now() - new Date(created).getTime();
-          // 50 minutes heuristic: xAI tokens live ~40-45 min
-          if (age > 50 * 60 * 1000 - TOKEN_EXPIRY_BUFFER_MS) return true;
+          if (age > XAI_TOKEN_FALLBACK_AGE_MS) return true;
         }
       }
     }
