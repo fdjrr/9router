@@ -19,6 +19,7 @@ const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
 // standard 5 min lead buffer) at which the fallback considers them expired.
 const XAI_TOKEN_FALLBACK_AGE_MS = 45 * 60 * 1000 - TOKEN_EXPIRY_BUFFER_MS;
 
+
 // Hosted tool types executed server-side by Grok CLI backend
 const HOSTED_TOOL_TYPES = new Set([
   "web_search",
@@ -198,26 +199,8 @@ export class GrokCliExecutor extends BaseExecutor {
     return this.config.baseUrl;
   }
 
-  /**
-   * Resolve the refresh token from a credentials object, checking both the
-   * top-level field and the providerSpecificData fallback.  Official Grok CLI
-   * stores the refresh token both places; this covers either layout.
-   */
-  _resolveRefreshToken(credentials) {
-    if (credentials?.refreshToken) return credentials.refreshToken;
-    return credentials?.providerSpecificData?.refreshToken || null;
-  }
-
   async refreshCredentials(credentials, log) {
-    const rt = this._resolveRefreshToken(credentials);
-    if (!rt) return null;
-
-    // Ensure providerSpecificData.refreshToken is set for the downstream merge
-    // (mergeRefreshedCredentials reads psd but refreshTokenByProvider reads
-    // credentials.refreshToken — bridge both).
-    if (!credentials.refreshToken) {
-      credentials = { ...credentials, refreshToken: rt };
-    }
+    if (!credentials?.refreshToken) return null;
     return refreshProviderCredentials("grok-cli", credentials, log);
   }
 
@@ -228,7 +211,8 @@ export class GrokCliExecutor extends BaseExecutor {
     // Fallback: xAI device-code tokens live ~40-45 min.  When the stored
     // credentials lack an expiresAt field, trigger a proactive refresh once
     // the credential is at least 40 min old (45 min max minus 5 min lead).
-    if (this._resolveRefreshToken(credentials)) {
+    const refreshToken = credentials?.refreshToken || credentials?.providerSpecificData?.refreshToken;
+    if (refreshToken) {
       const expiresAt = credentials.expiresAt;
       if (!expiresAt) {
         const created = credentials.createdAt || credentials.updatedAt;

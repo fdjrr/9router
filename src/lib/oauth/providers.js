@@ -350,9 +350,8 @@ const PROVIDERS = {
         .join(" ")
         .trim() || null;
 
-      // Mirror refreshToken into providerSpecificData as a defensive fallback so
-      // that _resolveRefreshToken() in the executor can find it even if the
-      // top-level column went missing during migration or re-serialisation.
+      // Mirror identity into providerSpecificData so GrokCliExecutor can set
+      // x-email / x-userid without depending on top-level credential shape.
       const rt = tokens.refresh_token || null;
 
       return {
@@ -363,9 +362,6 @@ const PROVIDERS = {
         // Top-level for dashboard connection cards
         email: email || undefined,
         displayName: displayName || undefined,
-        // Mirror identity + refresh_token into providerSpecificData so
-        // GrokCliExecutor can set x-email / x-userid and use the fallback
-        // refresh token without depending on top-level credential shape.
         providerSpecificData: {
           authMethod: "device_code",
           idToken: tokens.id_token || null,
@@ -901,6 +897,9 @@ const PROVIDERS = {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresIn: tokens.expires_in,
+      name: extra?.userInfo?.login || extra?.userInfo?.name,
+      displayName: extra?.userInfo?.name || extra?.userInfo?.login,
+      email: extra?.userInfo?.email || null,
       providerSpecificData: {
         copilotToken: extra?.copilotToken?.token,
         copilotTokenExpiresAt: extra?.copilotToken?.expires_at,
